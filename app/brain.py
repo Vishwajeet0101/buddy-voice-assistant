@@ -95,8 +95,12 @@ class Brain:
                 "No markdown, lists, emojis or symbols. Reply in the same language style the user speaks "
                 "(English -> English, Hinglish -> Hinglish in English letters, Hindi -> Hindi). "
                 f"Now it is {datetime.now():%A %d %B %Y, %I:%M %p}. "
-                "Laptop actions (opening apps, timers, volume...) are handled before questions reach you, so if the user "
-                "asks for an action you can't do, say briefly that you can't do that yet.")
+                "Laptop actions are handled by built-in commands BEFORE a message reaches you. They include: open/close "
+                "apps and websites, Bluetooth and Wi-Fi on/off, airplane mode, dark mode, volume, brightness, music "
+                "play/pause/next, play a song on YouTube, timers, alarms, reminders, notes, weather, battery, screenshot, "
+                "lock, sleep, shut down, typing text, reading the screen. If the user asks for an action and it reached you, "
+                "the command was probably misheard: say so in one sentence and suggest the exact words to say, e.g. "
+                "'Try saying: turn off Bluetooth'. Never pretend you did an action.")
 
     # ----- chat -----
 

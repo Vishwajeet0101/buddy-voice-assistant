@@ -497,7 +497,8 @@ class Engine:
             else:
                 on_text = lambda t: self.ui(lambda: self.orb().update("speaking", self.title(), t))
                 if speak:
-                    _, finished = speaker.say_stream(self.brain.ask_stream(text), on_text=on_text)
+                    full, finished = speaker.say_stream(self.brain.ask_stream(text), on_text=on_text)
+                    log.info("AI answered: %r", full[:200])
                 else:
                     try:
                         on_text(self.brain.ask(text))
@@ -507,6 +508,7 @@ class Engine:
                 self._run_after()
                 return finished
         shown = self.show_text or reply
+        log.info("replied: %r", reply[:200])
         self.ui(lambda: self.orb().update("speaking", self.title(), shown))
         finished = speaker.say(reply) if speak else True
         self._run_after()

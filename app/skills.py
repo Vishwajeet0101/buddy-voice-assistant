@@ -45,6 +45,7 @@ def clean(text):
     name = re.escape((config.load().get("assistant_name") or "buddy").lower())
     t = text.strip().lower()
     t = re.sub(rf"^(?:hey|hi|ok|okay)?\s*{name}\b[,!.]?\s*", "", t)
+    t = re.sub(r"^(?:(?:no|i said|i told you|i mean|i want you to|arre|bhai|yaar|ok so|so)[,\s]+)+", "", t)
     t = re.sub(r"^(?:please|can you|could you|will you|would you)\s+", "", t)
     t = re.sub(r"\s+(?:please|for me|now)$", "", t)
     return t.strip().rstrip("!.?,").strip()
@@ -219,6 +220,7 @@ def help_(m, ctx):
     ctx.show_text = ("Open apps & websites  ·  close Chrome\n"
                      "Set a timer for 10 minutes  ·  wake me up at 7 am  ·  remind me to call mom at 6\n"
                      "Volume up / set volume to 40  ·  mute  ·  brightness 70\n"
+                     "Turn off Bluetooth  ·  Wi-Fi on  ·  airplane mode  ·  dark mode on\n"
                      "Play Believer on YouTube  ·  pause  ·  next song\n"
                      "What's the weather  ·  what time is it  ·  battery\n"
                      "Take a note  ·  read my notes  ·  type hello\n"
@@ -618,6 +620,81 @@ def recycle(m, ctx):
         ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0x7)
         return "Recycle bin is empty."
     return confirm("Empty the recycle bin? Those files will be gone for good.", do, ctx)
+
+
+_RADIO_PS = r"""
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$g = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+Function Await($t, $type) { $n = $g.MakeGenericMethod($type).Invoke($null, @($t)); $n.Wait(-1) | Out-Null; $n.Result }
+[Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+[Windows.Devices.Radios.RadioAccessStatus,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+[Windows.Devices.Radios.RadioState,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+Await ([Windows.Devices.Radios.Radio]::RequestAccessAsync()) ([Windows.Devices.Radios.RadioAccessStatus]) | Out-Null
+$all = Await ([Windows.Devices.Radios.Radio]::GetRadiosAsync()) ([System.Collections.Generic.IReadOnlyList[Windows.Devices.Radios.Radio]])
+foreach ($r in $all) {
+  if ('KINDS' -split ',' -contains [string]$r.Kind) {
+    if ('STATE' -ne 'status') { Await ($r.SetStateAsync('STATE')) ([Windows.Devices.Radios.RadioAccessStatus]) | Out-Null }
+    "$($r.Kind)=$($r.State)"
+  }
+}
+"""
+
+
+def radio(kinds, state):
+    """kinds: 'Bluetooth' / 'WiFi' / 'Bluetooth,WiFi'; state: 'On', 'Off' or 'status'. Returns {'Bluetooth': 'On', ...}."""
+    out = _ps(_RADIO_PS.replace("KINDS", kinds).replace("STATE", state))
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+@skill(r"(?:turn |switch |put )?(on|off|enable|disable|start|stop)\s+(?:the\s+)?(bluetooth|blue tooth|wi-?fi|wireless|internet)"
+       r"|(?:turn |switch )?(?:the\s+)?(bluetooth|blue tooth|wi-?fi|wireless)\s+(on|off)|(bluetooth|blue tooth|wi-?fi) (band|chalu|on|off) karo"
+       r"|(?:enable |disable )?(bluetooth|blue tooth|wi-?fi)\s+(enable|disable)")
+def radio_switch(m, ctx):
+    g = [x.lower() for x in m.groups() if x]
+    what = next(x for x in g if x not in ("on", "off", "enable", "disable", "start", "stop", "band", "chalu"))
+    on = any(x in ("on", "enable", "start", "chalu") for x in g)
+    kind = "Bluetooth" if "blue" in what else "WiFi"
+    label = "Bluetooth" if kind == "Bluetooth" else "Wi-Fi"
+
+    def do():
+        res = radio(kind, "On" if on else "Off")
+        if not res:
+            return f"I couldn't find a {label} switch on this laptop."
+        return f"{label} is {'on' if on else 'off'}."
+    if kind == "WiFi" and not on:
+        return confirm("Turning off Wi-Fi will cut your internet, and I won't be able to answer questions. Turn it off?",
+                       do, ctx)
+    return do()
+
+
+@skill(r"(?:is|check)\s+(?:the\s+)?(bluetooth|blue tooth|wi-?fi)\s+(?:on|off|status|enabled)|(bluetooth|blue tooth|wi-?fi) status")
+def radio_status(m, ctx):
+    what = (m.group(1) or m.group(2)).lower()
+    kind = "Bluetooth" if "blue" in what else "WiFi"
+    st = radio(kind, "status").get(kind)
+    return f"{'Bluetooth' if kind == 'Bluetooth' else 'Wi-Fi'} is {st.lower()}." if st else "I couldn't check that."
+
+
+@skill(r"(?:turn |switch )?(on|off)\s+airplane mode|(?:turn |switch )?airplane mode\s+(on|off)|(?:enable|disable) airplane mode")
+def airplane(m, ctx):
+    on = (m.group(1) or m.group(2) or ("on" if m.group(0).startswith("enable") else "off")) == "on"
+
+    def do():
+        radio("Bluetooth,WiFi,MobileBroadband", "Off" if on else "On")
+        return "Airplane mode is on. Wi-Fi and Bluetooth are off." if on else "Airplane mode is off."
+    return confirm("That turns off Wi-Fi, so I'll lose the internet. Continue?", do, ctx) if on else do()
+
+
+@skill(r"(?:turn |switch )?(on|off)\s+dark mode|(?:turn |switch |enable |disable )?dark mode\s*(on|off)?|(?:switch to |turn on |enable )?light mode")
+def dark_mode(m, ctx):
+    t = m.group(0)
+    on = "light" not in t and (m.group(1) or m.group(2) or ("off" if "disable" in t else "on")) == "on"
+    import winreg
+    key = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, "AppsUseLightTheme", 0, winreg.REG_DWORD, 0 if on else 1)
+        winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, 0 if on else 1)
+    return "Dark mode is on." if on else "Light mode is on."
 
 
 @skill(r"minimi[sz]e (?:all|everything|all windows)|show (?:the )?desktop")
