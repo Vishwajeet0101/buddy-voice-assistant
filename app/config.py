@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 APP_NAME = "Buddy"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 REPO_URL = "https://github.com/Vishwajeet0101/buddy-voice-assistant"
 
 APP_DIR = Path(__file__).resolve().parent
