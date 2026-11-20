@@ -67,7 +67,7 @@ def make_shortcut(lnk, args=""):
 def set_startup(on):
     try:
         if on:
-            make_shortcut(STARTUP_LNK)
+            make_shortcut(STARTUP_LNK, "--startup")
         elif STARTUP_LNK.exists():
             STARTUP_LNK.unlink()
     except Exception as e:
@@ -99,6 +99,7 @@ class App(ctk.CTk):
 
         self.orb = Orb(self, on_click=lambda: self.engine.stop_session())
         self.engine = Engine(self.ui, lambda: self.orb, self.notify)
+        self.engine.quiet_start = "--startup" in sys.argv       # started with Windows: no pop-up
         self.built = False
         apps.load()
         self.engine.start()
@@ -107,7 +108,7 @@ class App(ctk.CTk):
         self.after(40, self.process_queue)
 
         s = config.load()
-        if s["start_with_windows"] and not STARTUP_LNK.exists():
+        if s["start_with_windows"]:                  # (re)create it every start, so it always points at this copy
             threading.Thread(target=set_startup, args=(True,), daemon=True).start()
         if not s["setup_done"]:
             threading.Thread(target=self.first_run_shortcuts, daemon=True).start()
@@ -297,12 +298,40 @@ class App(ctk.CTk):
         self.sw_follow = ctk.CTkSwitch(c, text="Keep listening a few seconds after answering (follow-up questions)",
                                        progress_color=ACCENT)
         self.sw_speak = ctk.CTkSwitch(c, text="Speak answers out loud", progress_color=ACCENT)
-        self.sw_startup = ctk.CTkSwitch(c, text="Start with Windows", progress_color=ACCENT)
-        for i, sw in enumerate((self.sw_wake, self.sw_follow, self.sw_speak, self.sw_startup)):
-            sw.grid(row=1 + i, column=0, columnspan=3, sticky="w", padx=18, pady=(6, 16 if i == 3 else 6))
+        self.sw_startup = ctk.CTkSwitch(c, text="Start with Windows (and keep working after sleep)", progress_color=ACCENT)
+        self.sw_brief = ctk.CTkSwitch(c, text="Morning briefing: weather, reminders and news when I first use the laptop",
+                                      progress_color=ACCENT)
+        for i, sw in enumerate((self.sw_wake, self.sw_follow, self.sw_speak, self.sw_startup, self.sw_brief)):
+            sw.grid(row=1 + i, column=0, columnspan=3, sticky="w", padx=18, pady=(6, 16 if i == 4 else 6))
+
+        # --- only my voice ---
+        v = self.card(body, 4, "Only my voice",
+                      "Teach me your voice, so other people, the TV or YouTube can't wake me.")
+        vrow2 = ctk.CTkFrame(v, fg_color="transparent")
+        vrow2.grid(row=2, column=0, columnspan=3, sticky="w", padx=18, pady=(4, 6))
+        self.btn_train = ctk.CTkButton(vrow2, text="🎙  Train my voice", width=150, fg_color=ACCENT,
+                                       hover_color=ACCENT_HOVER, command=self.train_voice)
+        self.btn_train.pack(side="left")
+        self.sw_only = ctk.CTkSwitch(vrow2, text="Only wake for my voice", progress_color=ACCENT)
+        self.sw_only.pack(side="left", padx=14)
+        self.train_msg = ctk.CTkLabel(v, text="", text_color=DIM, justify="left", anchor="w", wraplength=540,
+                                      font=ctk.CTkFont(size=14))
+        self.train_msg.grid(row=3, column=0, columnspan=3, sticky="w", padx=18, pady=(0, 14))
+
+        # --- contacts & routines ---
+        r = self.card(body, 5, "WhatsApp contacts & routines")
+        ctk.CTkLabel(r, text="WhatsApp contacts (one per line:  Mom = +91 98765 43210). Saved contacts get messages\n"
+                             "sent directly; anyone else is found by search and I ask before sending.",
+                     text_color=DIM, justify="left", anchor="w").grid(row=1, column=0, columnspan=3, sticky="w", padx=18)
+        self.t_contacts = ctk.CTkTextbox(r, height=80)
+        self.t_contacts.grid(row=2, column=0, columnspan=3, sticky="ew", padx=18, pady=(4, 10))
+        ctk.CTkLabel(r, text="Routines - say \"start study mode\" (one per line:  name mode = command; command; ...)",
+                     text_color=DIM, justify="left", anchor="w").grid(row=3, column=0, columnspan=3, sticky="w", padx=18)
+        self.t_routines = ctk.CTkTextbox(r, height=90)
+        self.t_routines.grid(row=4, column=0, columnspan=3, sticky="ew", padx=18, pady=(4, 16))
 
         # --- how to ---
-        d = self.card(body, 4, "How to use")
+        d = self.card(body, 6, "How to use")
         self.howto = ctk.CTkLabel(d, text="", justify="left", anchor="w", text_color=("gray20", "gray80"))
         self.howto.grid(row=1, column=0, columnspan=3, sticky="w", padx=18, pady=(0, 16))
 
@@ -325,9 +354,33 @@ class App(ctk.CTk):
                 e.insert(0, s[key])
         self.seg_voice.set("Female" if s["voice"] == "female" else "Male")
         for sw, key in ((self.sw_wake, "wake_word"), (self.sw_follow, "follow_up"), (self.sw_speak, "speak_replies"),
-                        (self.sw_startup, "start_with_windows")):
+                        (self.sw_startup, "start_with_windows"), (self.sw_brief, "morning_briefing"),
+                        (self.sw_only, "only_my_voice")):
             sw.select() if s.get(key) else sw.deselect()
+        for box, key in ((self.t_contacts, "contacts"), (self.t_routines, "routines")):
+            box.delete("1.0", "end")
+            box.insert("1.0", s.get(key) or "")
+        self.train_msg.configure(text="Your voice is trained." if s.get("voice_print") else
+                                 "Not trained yet - click the button and say 3 short sentences.")
         self.refresh_texts()
+
+    def train_voice(self):
+        self.btn_train.configure(state="disabled")
+        self.train_msg.configure(text_color=("gray10", "gray95"))
+
+        def step(msg):
+            self.ui(lambda: self.train_msg.configure(text=msg))
+
+        def work():
+            ok, msg = self.engine.train_voice(step)
+
+            def done():
+                self.btn_train.configure(state="normal")
+                self.train_msg.configure(text=msg, text_color=GREEN if ok else ORANGE)
+                if ok:
+                    self.sw_only.select()
+            self.ui(done)
+        threading.Thread(target=work, daemon=True).start()
 
     def refresh_texts(self):
         s = config.load()
@@ -342,9 +395,11 @@ class App(ctk.CTk):
             f"• Say \"Hey {n}\" - I'll answer, then just talk.  Or say it in one go: \"Hey {n}, open Chrome\".\n"
             "• No wake word? Press Ctrl + Alt + B (or click my tray icon).\n"
             "• Esc or a click on the popup stops me talking.\n"
+            "• Say \"stop\" or \"Hey " + n + "\" while I'm talking to interrupt me.\n"
             "• Try: what's the weather · set a timer for 5 minutes · wake me up at 7 am · volume 40\n"
-            "  play Believer on YouTube · open WhatsApp · take a note · what's on my screen\n"
-            "  remind me to call mom at 6 pm · battery · lock · who won the last World Cup?\n"
+            "  play Believer on YouTube · send WhatsApp to Rahul saying I'm coming · good morning\n"
+            "  new tab · scroll down · close this window · open my resume PDF · start study mode\n"
+            "  what's on my screen · remind me to call mom at 6 pm · bhai bluetooth band kar do\n"
             f"• Notes are saved in Documents\\Buddy Notes.txt.  Log: {config.LOG_PATH}"))
 
     def tick(self):
@@ -364,7 +419,14 @@ class App(ctk.CTk):
                  groq_key=self.e_groq.get().strip(), gemini_key=self.e_gemini.get().strip(),
                  voice=self.seg_voice.get().lower(), wake_word=bool(self.sw_wake.get()),
                  follow_up=bool(self.sw_follow.get()), speak_replies=bool(self.sw_speak.get()),
-                 start_with_windows=bool(self.sw_startup.get()), setup_done=True)
+                 start_with_windows=bool(self.sw_startup.get()), setup_done=True,
+                 morning_briefing=bool(self.sw_brief.get()),
+                 only_my_voice=bool(self.sw_only.get()) and bool(s.get("voice_print")),
+                 contacts=self.t_contacts.get("1.0", "end").strip(),
+                 routines=self.t_routines.get("1.0", "end").strip())
+        if self.sw_only.get() and not s.get("voice_print"):
+            self.sw_only.deselect()
+            self.train_msg.configure(text="Train your voice first (button above).", text_color=ORANGE)
         config.save(s)
         threading.Thread(target=set_startup, args=(s["start_with_windows"],), daemon=True).start()
         threading.Thread(target=self.engine.warm_greetings, daemon=True).start()

@@ -34,9 +34,15 @@ NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five":
              "thirty": 30, "forty": 40, "forty five": 45, "fifty": 50, "sixty": 60, "ninety": 90}
 
 
-def skill(pattern, fast=True):
+def skill(pattern, fast=True, first=False):
+    """first=True: check this skill before the general ones (e.g. 'open new tab' before 'open <app>')."""
     def deco(fn):
-        SKILLS.append((re.compile(pattern, re.I), fn, fast))
+        entry = (re.compile(pattern, re.I), fn, fast)
+        if first:
+            SKILLS.insert(sum(1 for e in SKILLS if getattr(e[1], "_first", False)), entry)
+            fn._first = True
+        else:
+            SKILLS.append(entry)
         return fn
     return deco
 
@@ -695,6 +701,415 @@ def dark_mode(m, ctx):
         winreg.SetValueEx(k, "AppsUseLightTheme", 0, winreg.REG_DWORD, 0 if on else 1)
         winreg.SetValueEx(k, "SystemUsesLightTheme", 0, winreg.REG_DWORD, 0 if on else 1)
     return "Dark mode is on." if on else "Light mode is on."
+
+
+# ===================== Smart PC control (acts on the window you're using) =====================
+
+_VK = {"ctrl": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B, "tab": 0x09, "enter": 0x0D, "esc": 0x1B, "f4": 0x73,
+       "f5": 0x74, "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "pageup": 0x21, "pagedown": 0x22,
+       "home": 0x24, "end": 0x23, "plus": 0xBB, "minus": 0xBD, "0": 0x30, "space": 0x20, "delete": 0x2E}
+
+
+def keys(combo):
+    """keys('ctrl+shift+t') - press a shortcut in the active window."""
+    codes = [_VK.get(k) or ord(k.upper()) for k in combo.lower().split("+")]
+    for c in codes:
+        user32.keybd_event(c, 0, 0, 0)
+    for c in reversed(codes):
+        user32.keybd_event(c, 0, 2, 0)
+
+
+SHORTCUTS = [   # (what you say, keys, reply)
+    (r"(?:open (?:a )?)?new tab|naya tab(?: kholo)?", "ctrl+t", "New tab."),
+    (r"close (?:this |the )?tab|tab band karo", "ctrl+w", "Closed the tab."),
+    (r"(?:reopen|restore|open) (?:the )?(?:last )?closed tab", "ctrl+shift+t", "Reopened it."),
+    (r"(?:next|switch) tab", "ctrl+tab", "Next tab."),
+    (r"previous tab|last tab", "ctrl+shift+tab", "Previous tab."),
+    (r"(?:open (?:a )?)?new window", "ctrl+n", "New window."),
+    (r"(?:refresh|reload)(?: (?:the|this) page)?", "f5", "Refreshed."),
+    (r"go back|back jao|previous page", "alt+left", "Going back."),
+    (r"go forward|next page", "alt+right", "Going forward."),
+    (r"scroll down(?: a bit)?|neeche (?:jao|karo)", "pagedown", ""),
+    (r"scroll up(?: a bit)?|upar (?:jao|karo)", "pageup", ""),
+    (r"(?:scroll to (?:the )?|go to (?:the )?)top", "ctrl+home", ""),
+    (r"(?:scroll to (?:the )?|go to (?:the )?)bottom", "ctrl+end", ""),
+    (r"zoom in", "ctrl+plus", "Zoomed in."),
+    (r"zoom out", "ctrl+minus", "Zoomed out."),
+    (r"reset zoom|normal zoom", "ctrl+0", "Zoom reset."),
+    (r"copy(?: (?:this|that|it))?", "ctrl+c", "Copied."),
+    (r"paste(?: (?:it|here|that))?", "ctrl+v", "Pasted."),
+    (r"cut(?: (?:this|that|it))?", "ctrl+x", "Cut."),
+    (r"undo(?: (?:that|it))?", "ctrl+z", "Undone."),
+    (r"redo(?: (?:that|it))?", "ctrl+y", "Redone."),
+    (r"select all", "ctrl+a", "Selected everything."),
+    (r"save(?: (?:this|it|the file))?", "ctrl+s", "Saved."),
+    (r"find (?:on|in) (?:this )?page", "ctrl+f", "Type what to find."),
+    (r"(?:switch|change) (?:the )?window|alt tab", "alt+tab", ""),
+    (r"press enter|hit enter", "enter", ""),
+    (r"press escape|press esc", "esc", ""),
+    (r"(?:open )?task view|show (?:all )?windows", "win+tab", ""),
+    (r"(?:open )?(?:the )?start menu", "win", ""),
+    (r"(?:open )?(?:the )?(?:notification|action) (?:center|centre|panel)|(?:open )?quick settings", "win+a", ""),
+    (r"(?:open )?(?:the )?emoji (?:panel|keyboard)", "win+.", ""),
+    (r"(?:open )?clipboard history", "win+v", ""),
+    (r"snap (?:it |this |window )?(?:to the )?left", "win+left", ""),
+    (r"snap (?:it |this |window )?(?:to the )?right", "win+right", ""),
+]
+_VK["."] = 0xBE
+
+
+def _shortcut_skill(pattern, combo, reply):
+    @skill(pattern, first=True)
+    def run_shortcut(m, ctx):
+        ctx.after_speech(lambda: keys(combo)) if not reply else keys(combo)
+        return reply or "Okay."
+    run_shortcut.__name__ = "shortcut_" + combo.replace("+", "_")
+
+
+for _p, _c, _r in SHORTCUTS:
+    _shortcut_skill(_p, _c, _r)
+
+
+def _active_window():
+    return user32.GetForegroundWindow()
+
+
+@skill(r"close (?:this|the|current) (?:window|app|application|program)|close (?:it|this)|ye band karo|isko band karo", first=True)
+def close_window(m, ctx):
+    hwnd = _active_window()
+    ctx.after_speech(lambda: user32.PostMessageW(hwnd, 0x0010, 0, 0))     # WM_CLOSE (asks to save if needed)
+    return "Closing it."
+
+
+@skill(r"minimi[sz]e (?:this|the|current)?\s*(?:window|app|it)|minimi[sz]e", first=True)
+def minimize_window(m, ctx):
+    user32.ShowWindow(_active_window(), 6)
+    return "Minimized."
+
+
+@skill(r"maximi[sz]e (?:this|the|current)?\s*(?:window|app|it)|maximi[sz]e|full ?screen (?:this )?window", first=True)
+def maximize_window(m, ctx):
+    user32.ShowWindow(_active_window(), 3)
+    return "Maximized."
+
+
+@skill(r"(?:switch|go) to\s+(.+?)(?:\s+window)?", fast=False)
+def switch_to(m, ctx):
+    """Brings a running app's window to the front: 'switch to chrome'."""
+    want = m.group(1).lower().replace(" ", "")
+    want = {"vscode": "visual studio code", "code": "visual studio code"}.get(want, m.group(1).lower())
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    def each(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if want in buf.value.lower() or want.replace(" ", "") in buf.value.lower().replace(" ", ""):
+                    found.append(hwnd)
+        return True
+    user32.EnumWindows(each, 0)
+    if not found:
+        return None if not apps.find(m.group(1)) else open_app(m, ctx)
+    hwnd = found[0]
+    user32.keybd_event(0x12, 0, 0, 0)          # tapping Alt lets us bring another window to the front
+    user32.keybd_event(0x12, 0, 2, 0)
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+    return f"Switched to {m.group(1)}."
+
+
+# ===================== Files =====================
+
+FILE_DIRS = [Path.home() / d for d in ("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music", "OneDrive")]
+FILE_KINDS = {"pdf": [".pdf"], "word": [".docx", ".doc"], "document": [".docx", ".doc", ".pdf", ".txt"],
+              "excel": [".xlsx", ".xls", ".csv"], "sheet": [".xlsx", ".xls", ".csv"], "powerpoint": [".pptx", ".ppt"],
+              "ppt": [".pptx", ".ppt"], "presentation": [".pptx", ".ppt"], "photo": [".jpg", ".jpeg", ".png", ".heic"],
+              "image": [".jpg", ".jpeg", ".png", ".webp"], "picture": [".jpg", ".jpeg", ".png"], "video": [".mp4", ".mkv", ".mov"],
+              "song": [".mp3", ".m4a", ".wav"], "zip": [".zip", ".rar", ".7z"], "text": [".txt"], "notes": [".txt", ".md"]}
+
+
+def find_files(query, limit=5):
+    """Finds files in your main folders whose names match the spoken words. Best matches first."""
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower())
+             if w not in ("my", "the", "a", "file", "files", "folder", "called", "named", "latest", "last", "recent")]
+    exts = []
+    for w in list(words):
+        if w in FILE_KINDS:
+            exts += FILE_KINDS[w]
+            words.remove(w)
+    hits = []
+    for base in FILE_DIRS:
+        if not base.exists():
+            continue
+        for root, dirs, files in os.walk(base):
+            depth = len(Path(root).relative_to(base).parts)
+            dirs[:] = [d for d in dirs if not d.startswith((".", "node_modules", "__pycache__", "venv", "AppData"))
+                       and depth < 4]
+            for f in files:
+                low = f.lower()
+                if exts and not low.endswith(tuple(exts)):
+                    continue
+                score = sum(1 for w in words if w in low)
+                if words and score == 0:
+                    continue
+                p = Path(root) / f
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                hits.append((score, mtime, p))
+    hits.sort(key=lambda h: (-h[0], -h[1]))
+    return [h[2] for h in hits[:limit]]
+
+
+@skill(r"open (?:the |my )?(?:last|latest|recent|newest) (?:downloaded |download )?(?:file|download)(?: i downloaded)?", first=True)
+def open_last_download(m, ctx):
+    folder = Path.home() / "Downloads"
+    files = [p for p in folder.iterdir() if p.is_file() and not p.name.endswith((".crdownload", ".part", ".tmp"))] \
+        if folder.exists() else []
+    if not files:
+        return "Your Downloads folder is empty."
+    newest = max(files, key=lambda p: p.stat().st_mtime)
+    os.startfile(newest)
+    return f"Opening {newest.stem}."
+
+
+@skill(r"(?:open|find|show(?: me)?|search for|where is|kholo)\s+(?:my\s+|the\s+)?(.+?\b(?:pdf|word|document|excel|sheet|"
+       r"powerpoint|ppt|presentation|photo|image|picture|video|song|zip|text|notes|file|resume|cv|assignment|report|"
+       r"certificate|marksheet|notes)s?\b.*?)(?:\s+file)?", fast=False, first=True)
+def open_file(m, ctx):
+    found = find_files(m.group(1))
+    if not found:
+        return f"I couldn't find {m.group(1)} in your Desktop, Documents or Downloads."
+    best = found[0]
+    if m.group(0).startswith(("find", "show", "where", "search")):
+        subprocess.Popen(["explorer", "/select,", str(best)])
+        ctx.show_text = "\n".join(str(p) for p in found)
+        return f"Found {best.name}. I've shown it in its folder."
+    os.startfile(best)
+    return f"Opening {best.stem}."
+
+
+# ===================== WhatsApp =====================
+
+def contacts():
+    """Contacts from settings: 'Mom = +91 98765 43210' per line -> {'mom': '919876543210'}."""
+    out = {}
+    for line in (config.load().get("contacts") or "").splitlines():
+        if "=" in line:
+            name, num = line.split("=", 1)
+            digits = re.sub(r"\D", "", num)
+            if len(digits) == 10:
+                digits = "91" + digits          # Indian number without country code
+            if name.strip() and len(digits) >= 10:
+                out[name.strip().lower()] = digits
+    return out
+
+
+def _contact_number(name):
+    c = contacts()
+    name = name.lower().strip()
+    if name in c:
+        return c[name]
+    close = [k for k in c if name in k or k in name]
+    return c[close[0]] if close else None
+
+
+def _whatsapp_open_chat(name):
+    """Opens WhatsApp Desktop on the chat with `name`. Returns 'number' or 'search' (how it was found)."""
+    number = _contact_number(name)
+    if number:
+        os.startfile(f"whatsapp://send?phone={number}")
+        return "number"
+    hit = apps.find("whatsapp")
+    os.startfile(hit[1] if hit else "whatsapp:")
+    import time as _t
+    _t.sleep(2.5)
+    keys("ctrl+f")                     # search chats
+    _t.sleep(0.6)
+    type_text(name)
+    _t.sleep(1.5)
+    keys("down")
+    _t.sleep(0.2)
+    keys("enter")
+    return "search"
+
+
+def type_text(text):
+    from ctypes import Structure, Union, c_size_t, sizeof
+
+    class KI(Structure):
+        _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD), ("time", wt.DWORD), ("extra", c_size_t)]
+
+    class MI(Structure):
+        _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("data", wt.DWORD), ("flags", wt.DWORD), ("time", wt.DWORD),
+                    ("extra", c_size_t)]
+
+    class U(Union):
+        _fields_ = [("ki", KI), ("mi", MI)]
+
+    class INPUT(Structure):
+        _fields_ = [("type", wt.DWORD), ("u", U)]
+    for ch in text:
+        code = ord(ch)
+        arr = (INPUT * 2)(INPUT(1, U(ki=KI(0, code, 4, 0, 0))), INPUT(1, U(ki=KI(0, code, 6, 0, 0))))
+        user32.SendInput(2, arr, sizeof(INPUT))
+
+
+@skill(r"(?:send\s+(?:a\s+)?(?:whatsapp|whats app|message|msg|text)(?:\s+message)?\s+to|whatsapp|message|text)\s+(.+?)"
+       r"\s*(?:on whatsapp\s*)?(?:saying|that|says|:|,)\s+(.+)|(.+?)\s+ko\s+(?:whatsapp|message)\s+(?:karo|bhejo)\s+(?:ki\s+)?(.+)",
+       fast=False, first=True)
+def whatsapp_send(m, ctx):
+    name = (m.group(1) or m.group(3)).strip()
+    name = re.sub(r"\s+on whatsapp$", "", name)
+    text = (m.group(2) or m.group(4)).strip()
+    known = _contact_number(name) is not None
+
+    def send():
+        how = _whatsapp_open_chat(name)
+        import time as _t
+        _t.sleep(3.0 if how == "number" else 1.2)
+        type_text(text)
+        if how == "number":
+            _t.sleep(0.3)
+            keys("enter")
+            return f"Sent to {name}."
+
+        def finish(answer):
+            if YES.fullmatch(clean(answer)) or clean(answer) in ("send", "send it", "bhej do"):
+                keys("enter")
+                return "Sent."
+            return "Okay, I didn't send it. The message is still typed in the chat."
+        ctx.pending = finish
+        return f"I typed it in the chat I found for {name}. Check it's the right person, then say send."
+    if known:
+        return confirm(f"Send “{text}” to {name} on WhatsApp?", send, ctx)
+    ctx.after_speech(lambda: None)
+    return send()
+
+
+@skill(r"(?:open\s+)?(?:whatsapp\s+)?chat with\s+(.+?)(?:\s+on whatsapp)?|open\s+(.+?)'?s?\s+(?:whatsapp\s+)?chat", fast=False, first=True)
+def whatsapp_chat(m, ctx):
+    name = (m.group(1) or m.group(2)).strip()
+    ctx.after_speech(lambda: _whatsapp_open_chat(name))
+    return f"Opening your chat with {name}."
+
+
+@skill(r"(?:make a\s+)?(video\s+)?call\s+(.+?)\s+on whatsapp|whatsapp (video\s+)?call\s+(?:to\s+)?(.+)|(.+?)\s+ko\s+(video\s+)?call karo",
+       fast=False, first=True)
+def whatsapp_call(m, ctx):
+    g = m.groups()
+    video = bool(g[0] or g[2] or g[5])
+    name = (g[1] or g[3] or g[4]).strip()
+
+    def call():
+        _whatsapp_open_chat(name)
+        import time as _t
+        _t.sleep(3)
+        label = "Video call" if video else "Voice call"
+        # Press the call button through Windows UI Automation (WhatsApp has no keyboard shortcut for calls).
+        ps = ("Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes; "
+              "$w=[Windows.Automation.AutomationElement]::RootElement.FindFirst('Children',"
+              "(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,'WhatsApp'))); "
+              "if($w){$b=$w.FindAll('Descendants',[Windows.Automation.Condition]::TrueCondition)|"
+              f"Where-Object {{$_.Current.Name -like '*{label}*'}}|Select-Object -First 1; "
+              "if($b){$b.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); 'ok'}}")
+        if "ok" in _ps(ps):
+            return f"Calling {name}."
+        return f"I opened the chat with {name}. Tap the {label.lower()} button at the top to call."
+    return confirm(f"{'Video' if video else 'Voice'} call {name} on WhatsApp?", call, ctx)
+
+
+# ===================== Routines & briefing =====================
+
+def routines():
+    """{'study mode': ['close youtube', 'open vs code', ...]} from settings."""
+    out = {}
+    for line in (config.load().get("routines") or "").splitlines():
+        if "=" in line:
+            name, steps = line.split("=", 1)
+            out[name.strip().lower()] = [s.strip() for s in steps.split(";") if s.strip()]
+    return out
+
+
+@skill(r"(?!.*\b(?:dark|light|airplane|aeroplane|flight|sleep) mode\b)(?:start|run|begin|activate|turn on|switch to|enable)?\s*"
+       r"(.+?\s+mode|.+?\s+routine)(?:\s+(?:on|start|chalu karo))?", first=True)
+def run_routine(m, ctx):
+    name = re.sub(r"\s+routine$", "", m.group(1).strip().lower())
+    all_r = routines()
+    steps = all_r.get(name) or all_r.get(name + " mode") or all_r.get(re.sub(r"\s+mode$", "", name))
+    if not steps:
+        return None if name in ("dark mode", "light mode", "airplane mode") else \
+            f"I don't have a {name}. You can add routines in my settings."
+    done = []
+    for step in steps:
+        fn, mm, _ = find(step)
+        if not fn or fn is run_routine:
+            continue
+        try:
+            fn(mm, ctx)
+            done.append(step)
+        except Exception as e:
+            config.log.warning("routine step %r failed: %r", step, e)
+    ctx.pending = None
+    ctx.show_text = f"{name.title()}:\n" + "\n".join(f"✓ {s}" for s in done)
+    return f"{name.title()} is on." if done else f"Nothing in {name} worked."
+
+
+def news_headlines(n=3):
+    import xml.etree.ElementTree as ET
+    req = urllib.request.Request("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en",
+                                 headers={"User-Agent": "Mozilla/5.0"})
+    root = ET.fromstring(urllib.request.urlopen(req, timeout=8).read())
+    titles = [re.sub(r"\s+-\s+[^-]+$", "", i.findtext("title") or "") for i in root.iter("item")]
+    return [t for t in titles if t][:n]
+
+
+def briefing_text(ctx):
+    s = config.load()
+    now = datetime.now()
+    part = "morning" if now.hour < 12 else "afternoon" if now.hour < 17 else "evening"
+    user = s.get("user_name") or ""
+    lines = [f"Good {part}{', ' + user if user else ''}! It's {now:%A, %d %B}, {now:%I:%M %p}.".replace(" 0", " ")]
+    try:
+        lines.append(weather(next(rx for rx, fn, _ in SKILLS if fn is weather).fullmatch("weather"), ctx))
+    except Exception:
+        pass
+    today = [j for j in ctx.list_jobs() if j["at"].date() == now.date()]
+    if today:
+        lines.append("Today you have " + ", ".join(
+            (j["text"].replace("Reminder: ", "a reminder to ") if j["kind"] == "reminder" else f"an {j['kind']}")
+            + f" at {j['at']:%I:%M %p}".replace(" 0", " ") for j in today[:4]) + ".")
+    b = psutil.sensors_battery()
+    if b and b.percent < 30 and not b.power_plugged:
+        lines.append(f"Battery is low, {int(b.percent)} percent - plug in soon.")
+    try:
+        heads = news_headlines()
+        if heads:
+            lines.append("In the news: " + ". ".join(heads) + ".")
+    except Exception:
+        pass
+    return " ".join(lines)
+
+
+@skill(r"good morning|good afternoon|good evening|(?:morning |daily )?briefing|brief me|what(?:'s| is) my day(?: like)?|"
+       r"(?:what(?:'s| is) )?(?:the )?(?:today'?s )?news(?: today)?|aaj ka plan")
+def briefing(m, ctx):
+    if "news" in m.group(0):
+        try:
+            heads = news_headlines(5)
+        except Exception:
+            return "I can't get the news right now."
+        ctx.show_text = "\n".join("• " + h for h in heads)
+        return "Top news: " + ". ".join(heads[:3]) + "."
+    ctx.thinking()
+    text = briefing_text(ctx)
+    ctx.show_text = text
+    return text
 
 
 @skill(r"minimi[sz]e (?:all|everything|all windows)|show (?:the )?desktop")

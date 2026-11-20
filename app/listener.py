@@ -5,6 +5,7 @@ When the offline text looks unsure (Hinglish, names, songs...) the recording is 
 """
 import array
 import io
+import itertools
 import json
 import random
 import re
@@ -29,6 +30,29 @@ BLOCK = RATE // 10                 # 0.1 s per read
 STOP_WORDS = {"stop", "cancel", "nothing", "never mind", "nevermind", "bas", "rehne do", "chhodo", "no", "nope",
               "thank you", "thanks", "ok thanks", "okay thanks", "thank you so much", "shukriya", "that's all",
               "that's it", "bye", "goodbye", "go away", "shut up", "be quiet"}
+# Said while Buddy is talking: stop talking (the whole heard phrase must be one of these)
+BARGE_STOP = {"stop", "stop it", "stop talking", "ruko", "ruk jao", "bas", "bas karo", "chup", "chup karo", "be quiet",
+              "shut up", "enough", "cancel", "okay stop", "ok stop", "wait", "buddy stop"}
+# Short words get misheard over the sound of Buddy's own voice - accept these when said on their own.
+BARGE_ALIKE = {"stock", "top", "stuff", "stopped", "stops", "shop", "stab", "stall", "bus", "buss", "bass", "boss",
+               "roku", "rocco", "brokaw", "brook", "rook", "rookie", "choop", "chip", "chop", "enough", "wade", "weight"}
+
+
+def cosine(a, b):
+    num = sum(x * y for x, y in zip(a, b))
+    den = (sum(x * x for x in a) ** 0.5) * (sum(y * y for y in b) ** 0.5)
+    return num / den if den else 0.0
+
+
+def idle_seconds():
+    """Seconds since the last key press / mouse move."""
+    import ctypes
+
+    class LII(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+    lii = LII(ctypes.sizeof(LII), 0)
+    ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+    return (ctypes.windll.kernel32.GetTickCount() - lii.dwTime) / 1000
 
 
 def rms(data):
@@ -116,6 +140,11 @@ class Engine:
         self.show_text = None
         self._after = []
         self.jobs_lock = threading.Lock()
+        self.spk = None                 # voice fingerprint model (for "only my voice")
+        self.last_spk = None
+        self.busy_reason = None         # "training" / "announcing": ignore the wake word for a moment
+        self._barge = None              # (recogniser, audio) of a sentence that interrupted Buddy
+        self.quiet_start = False        # started with Windows: no "I'm ready" pop-up
 
     def start(self):
         threading.Thread(target=self._main, daemon=True, name="listener").start()
@@ -151,8 +180,10 @@ class Engine:
                 self.status = f"Speech model problem: {e}. Retrying in 30 s."
                 time.sleep(30)
         threading.Thread(target=self.warm_greetings, daemon=True).start()
+        self.load_spk()
         name = config.load()["assistant_name"]
-        self.notify(f"{name} is ready", f'Say "Hey {name}" anytime. Press Ctrl+Alt+B to talk without the name.')
+        if not self.quiet_start:
+            self.notify(f"{name} is ready", f'Say "Hey {name}" anytime. Press Ctrl+Alt+B to talk without the name.')
         while True:
             try:
                 self._loop()
@@ -243,11 +274,101 @@ class Engine:
             with self._open_stream() as stream:
                 self._wake_loop(stream)
 
-    def _recognizer(self, grammar=None):
+    def _recognizer(self, grammar=None, spk=False):
         import vosk
         rec = vosk.KaldiRecognizer(self.model, RATE, json.dumps(grammar)) if grammar else vosk.KaldiRecognizer(self.model, RATE)
         rec.SetWords(True)
+        if spk and self.spk:
+            rec.SetSpkModel(self.spk)
         return rec
+
+    # ===================== only my voice =====================
+
+    def load_spk(self, download=False):
+        """Loads the small voice-fingerprint model (13 MB; downloaded the first time it's needed)."""
+        if self.spk:
+            return True
+        try:
+            import vosk
+            path = config.spk_model_dir()
+            if not path and download:
+                dest = config.DATA_DIR / "models"
+                dest.mkdir(exist_ok=True)
+                tmp = dest / "spk.zip.part"
+                with urllib.request.urlopen(config.SPK_MODEL_URL, timeout=60) as r, open(tmp, "wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+                with zipfile.ZipFile(tmp) as z:
+                    z.extractall(dest)
+                tmp.unlink()
+                path = config.spk_model_dir()
+            if path:
+                self.spk = vosk.SpkModel(str(path))
+        except Exception:
+            log.exception("voice fingerprint model")
+        return bool(self.spk)
+
+    def verify_on(self):
+        s = config.load()
+        return bool(s.get("only_my_voice") and s.get("voice_print") and self.spk)
+
+    def is_owner(self, vec):
+        """Does this voice fingerprint match the trained voice? (Unknown = yes, so Buddy never goes deaf.)"""
+        if not self.verify_on() or not vec:
+            return True
+        s = config.load()
+        sim = cosine(vec, s["voice_print"])
+        ok = sim >= float(s.get("voice_match", 0.45))
+        log.info("voice check: similarity %.2f -> %s", sim, "you" if ok else "someone else")
+        return ok
+
+    def train_voice(self, on_step):
+        """Records the wake phrase 3 times and saves the user's voice fingerprint.
+        on_step(message) shows progress. Returns (ok, message)."""
+        if not self.ready:
+            return False, "Still starting - try again in a few seconds."
+        on_step("Getting the voice model ready (13 MB, first time only)...")
+        if not self.load_spk(download=True):
+            return False, "Couldn't load the voice model. Check your internet and try again."
+        name = config.load()["assistant_name"]
+        phrases = [f"Hey {name}", f"Hey {name}, what's the time", f"Hey {name}, open Chrome"]
+        vecs = []
+        self.busy_reason = "training"
+        try:
+            with self._open_stream() as stream:
+                for i, phrase in enumerate(phrases):
+                    for attempt in range(3):
+                        on_step(f"Step {i + 1} of 3 - say:  “{phrase}”")
+                        vec = self._record_fingerprint(stream)
+                        if vec:
+                            vecs.append(vec)
+                            break
+                        on_step("I didn't hear that - please say it again, a bit louder.")
+                        time.sleep(1.2)
+        finally:
+            self.busy_reason = None
+        if len(vecs) < 2:
+            return False, "I couldn't hear you clearly. Try again in a quieter place."
+        avg = [sum(v[k] for v in vecs) / len(vecs) for k in range(len(vecs[0]))]
+        config.update(voice_print=avg, only_my_voice=True)
+        return True, f"Done! Now only your voice can wake {name}."
+
+    def _record_fingerprint(self, stream):
+        rec = self._recognizer(spk=True)
+        started, quiet, t0, vec = False, 0.0, time.time(), None
+        self._flush(stream)
+        while time.time() - t0 < 7:
+            data = bytes(stream.read(BLOCK)[0])
+            level = self._measure(data)
+            if rec.AcceptWaveform(amplify(data, self.gain)):
+                vec = json.loads(rec.Result()).get("spk") or vec
+            if level > self.threshold():
+                started, quiet = True, 0.0
+            elif started:
+                quiet += 0.1
+                if quiet >= 0.9:
+                    break
+        r = json.loads(rec.FinalResult())
+        return r.get("spk") or vec if started else None
 
     WAKE_PREFIX = {"hey", "hi", "ok", "okay", "hello", "hay", "he", "a", "yo"}
     SOUNDALIKE = {"buddy": {"body", "buddhi", "bodhi", "buddie"}}
@@ -272,9 +393,10 @@ class Engine:
     def _wake_loop(self, stream):
         """Runs the full offline recogniser on the mic and wakes up as soon as the name is heard."""
         self.name = self._wake_name()
-        rec = self._recognizer()
+        verify = self.verify_on()
+        rec = self._recognizer(spk=verify)
         frames = []
-        last_check = started = time.time()
+        last_check = started = last_read = time.time()
         silent_for = 99.0                  # seconds since anything louder than the room was heard
         pre = []
         while True:
@@ -284,9 +406,13 @@ class Engine:
                 return
             if time.time() - last_check > 2.5:
                 last_check = time.time()
-                if self.pause_reason() or self._wake_name() != self.name:
+                if self.pause_reason() or self._wake_name() != self.name or self.verify_on() != verify:
                     return
             data = bytes(stream.read(BLOCK)[0])
+            if time.time() - last_read > 3:            # the laptop was asleep (lid closed): reopen the microphone
+                log.info("woke from sleep - reopening the microphone")
+                return
+            last_read = time.time()
             level = self._measure(data)
             data = amplify(data, self.gain)
             silent_for = 0.0 if level > self.gate() else silent_for + 0.1
@@ -303,7 +429,7 @@ class Engine:
             final = rec.AcceptWaveform(data)
             r = json.loads(rec.Result() if final else rec.PartialResult())
             text = r.get("text", "") if final else r.get("partial", "")
-            after = self.wake_split(text) if text else None
+            after = self.wake_split(text) if text and not self.busy_reason else None
             if after is None:
                 if final:
                     frames = []
@@ -312,13 +438,16 @@ class Engine:
                 continue
             log.info("wake word heard: %r", text)
             if final:
+                if not self.is_owner(r.get("spk")):
+                    frames = []
+                    continue
                 if after.strip():                         # whole command already said: "Hey Buddy what's the time"
                     words = r.get("result", [])[-len(after.split()):]
                     self.session(stream, greet=False, heard=(after, words, to_wav(frames)))
                 else:
                     self.session(stream, greet=True)
             else:                                         # still talking - finish the sentence with this recogniser
-                self.session(stream, greet=None, rec=rec, frames=frames)
+                self.session(stream, greet=None, rec=rec, frames=frames, verify=verify)
             return
 
     # ----- loudness: everything is relative to this microphone's own background noise -----
@@ -368,14 +497,22 @@ class Engine:
         except Exception:
             pass
 
-    def session(self, stream, greet=True, heard=None, rec=None, frames=None):
-        """One conversation. greet=None: woke mid-sentence - finish it and greet only if nothing followed the name."""
+    def session(self, stream, greet=True, heard=None, rec=None, frames=None, verify=False):
+        """One conversation. greet=None: woke mid-sentence - finish it and greet only if nothing followed the name.
+        verify: check it's the owner's voice (after the sentence ends) before showing anything."""
         self.in_session = True
         self.cancel.clear()
         self.pending = None
         try:
-            threading.Thread(target=winsound.Beep, args=(880, 80), daemon=True).start()
             live_voice.warm()                  # open the voice connection now, so the answer is spoken sooner
+            if rec is not None and verify:
+                got = self.listen(stream, 2, rec=rec, frames=frames, quiet_end=0.6)
+                if not self.is_owner(self.last_spk):
+                    return
+                rec = None
+                heard = self._after_wake(got)
+                greet = heard is None
+            threading.Thread(target=winsound.Beep, args=(880, 80), daemon=True).start()
             self.ui(lambda: self.orb().show("listening", self.title("listening"), "Listening..."))
             if rec is not None:
                 got = self.listen(stream, 2, rec=rec, frames=frames, quiet_end=0.7)
@@ -396,9 +533,17 @@ class Engine:
                 text = self.understand(*heard)
                 if text is None:
                     break
-                finished = self.respond(text)
+                outcome = self.respond(text, stream)
                 heard = None
-                if not finished or self.cancel.is_set():
+                if outcome == "wake":               # you said "Hey Buddy" while it was talking: listen again
+                    self.ui(lambda: self.orb().update("listening", self.title("listening"), "Listening..."))
+                    if self._barge:                 # you were still talking: finish that sentence
+                        b_rec, b_frames = self._barge
+                        self._barge = None
+                        heard = self._after_wake(self.listen(stream, 2, rec=b_rec, frames=b_frames, quiet_end=0.7))
+                    wait = 7
+                    continue
+                if outcome != "done" or self.cancel.is_set():
                     break
                 if not (config.load().get("follow_up", True) or self.pending):
                     self.ui(lambda: self.orb().hide(4500))
@@ -437,6 +582,8 @@ class Engine:
         t0 = time.time()
         threshold = self.threshold()
 
+        self.last_spk = None
+
         def feed(data):
             frames.append(data)
             if rec.AcceptWaveform(data):
@@ -444,6 +591,7 @@ class Engine:
                 if r.get("text"):
                     texts.append(r["text"])
                     words.extend(r.get("result", []))
+                    self.last_spk = self.last_spk or r.get("spk")
                 return None
             return json.loads(rec.PartialResult()).get("partial", "")
 
@@ -475,6 +623,7 @@ class Engine:
         if r.get("text"):
             texts.append(r["text"])
             words.extend(r.get("result", []))
+            self.last_spk = self.last_spk or r.get("spk")
         text = " ".join(texts).strip()
         if not text and len(frames) < 8:
             return None
@@ -526,38 +675,112 @@ class Engine:
             return None
         return final
 
-    def respond(self, text):
-        """Runs a command or asks the AI, and says the answer. Returns False if you stopped it."""
+    def respond(self, text, stream=None):
+        """Runs a command or asks the AI, and says the answer.
+        Returns 'done', 'stopped' (Esc/click/"stop"), or 'wake' ("Hey Buddy" said while it was talking)."""
         if not text:
-            return True
+            return "done"
         self.show_text, self._after = None, []
         shown = text if len(text) < 120 else text[:117] + "..."
         self.ui(lambda: self.orb().update("thinking", self.title("thinking"), f"“{shown}”"))
         reply = skills.run(text, self)
         speak = config.load().get("speak_replies", True)
+        on_text = lambda t: self.ui(lambda: self.orb().update("speaking", self.title(), t))
+        if reply is None and not self.brain.has_ai():
+            reply = ("I can do laptop tasks without the internet, but to answer questions I need a free AI key. "
+                     "Right-click my tray icon and open Settings to add one.")
         if reply is None:
-            if not self.brain.has_ai():
-                reply = ("I can do laptop tasks without the internet, but to answer questions I need a free AI key. "
-                         "Right-click my tray icon and open Settings to add one.")
+            # Ask the AI. If it decides this was really a laptop command (any wording, Hinglish, Hindi...),
+            # it answers "CMD: <command>" and we run that command instead of speaking.
+            stream_ = self.brain.ask_stream(text)
+            try:
+                head, rest = self._peek(stream_)
+            except Exception as e:
+                head, rest = getattr(e, "friendly", "Sorry, something went wrong."), iter(())
+            if head.lstrip().upper().startswith("CMD:"):
+                command = (head + "".join(rest)).split(":", 1)[1].strip().strip('"').splitlines()[0]
+                log.info("AI turned %r into command %r", text, command)
+                reply = skills.run(command, self) or "Sorry, I can't do that on the laptop yet."
+                if self.brain.history and self.brain.history[-1]["role"] == "assistant":
+                    self.brain.history[-1]["text"] = reply
             else:
-                on_text = lambda t: self.ui(lambda: self.orb().update("speaking", self.title(), t))
-                if speak:
-                    full, finished = speaker.say_stream(self.brain.ask_stream(text), on_text=on_text)
+                chunks = itertools.chain([head], rest)
+                if not speak:
+                    on_text("".join(chunks))
+                    self._run_after()
+                    return "done"
+
+                def talk():
+                    full, finished = speaker.say_stream(chunks, on_text=on_text)
                     log.info("AI answered: %r", full[:200])
-                else:
-                    try:
-                        on_text(self.brain.ask(text))
-                    except Exception as e:
-                        on_text(getattr(e, "friendly", str(e)))
-                    finished = True
+                    return finished
+                outcome = self._speak(stream, talk, "")
                 self._run_after()
-                return finished
+                return outcome
         shown = self.show_text or reply
         log.info("replied: %r", reply[:200])
-        self.ui(lambda: self.orb().update("speaking", self.title(), shown))
-        finished = speaker.say(reply) if speak else True
+        on_text(shown)
+        outcome = self._speak(stream, lambda: speaker.say(reply), reply) if speak else "done"
         self._run_after()
-        return finished
+        return outcome
+
+    @staticmethod
+    def _peek(gen):
+        """Reads the first few characters of a stream (to spot 'CMD:'), and returns (head, rest_of_stream)."""
+        head = ""
+        for piece in gen:
+            head += piece
+            if len(head.strip()) >= 4:
+                break
+        return head, gen
+
+    def _speak(self, stream, talk, spoken_text):
+        """Runs talk() (which speaks and returns True if it finished) while still listening to the mic,
+        so you can interrupt: say "stop" to make Buddy be quiet, or "Hey Buddy" to ask something new."""
+        if stream is None:
+            return "done" if talk() else "stopped"
+        box = {}
+        t = threading.Thread(target=lambda: box.setdefault("ok", talk()), daemon=True)
+        t.start()
+        rec = self._recognizer()
+        frames = []
+        allow_wake = self.name not in spoken_text.lower()      # Buddy saying its own name mustn't wake itself
+        heard = None
+        self._barge = None
+        while t.is_alive():
+            try:
+                data = bytes(stream.read(BLOCK)[0])
+            except Exception:
+                break
+            self._measure(data)
+            data = amplify(data, self.gain)
+            frames.append(data)
+            final = rec.AcceptWaveform(data)
+            said = (json.loads(rec.Result()).get("text", "") if final
+                    else json.loads(rec.PartialResult()).get("partial", "")).strip()
+            if not said:
+                continue
+            if final:
+                log.debug("heard while talking: %r", said)
+            after = self.wake_split(said)
+            rest = (after or "").strip()
+            if said in BARGE_STOP or rest in BARGE_STOP or (final and said in BARGE_ALIKE) \
+                    or (after is not None and rest in BARGE_ALIKE):
+                heard = "stopped"
+            elif allow_wake and after is not None and (rest or final):
+                heard = "wake"                     # "Hey Buddy ..." - keep listening to the rest of the sentence
+                if not final:
+                    self._barge = (rec, frames)
+            if heard:
+                log.info("interrupted by voice: %r", said)
+                speaker.stop()
+                break
+            if final:
+                frames = []
+        t.join(5)
+        if heard:
+            return heard
+        return "done" if box.get("ok", True) else "stopped"
 
     def _run_after(self):
         for fn in self._after:
@@ -598,9 +821,37 @@ class Engine:
             self._save_jobs(keep)
         return len(jobs) - len(keep)
 
+    def announce(self, text, title=None):
+        """Speaks something Buddy starts by itself (morning briefing), with the popup."""
+        self.busy_reason = "announcing"
+        try:
+            self.ui(lambda: self.orb().show("speaking", title or self.title(), text))
+            speaker.say(text)
+            self.ui(lambda: self.orb().hide(6000))
+        finally:
+            self.busy_reason = None
+
+    def _maybe_briefing(self):
+        """Morning briefing: the first time you use the laptop between 5 am and noon."""
+        s = config.load()
+        now = datetime.now()
+        if (not s.get("morning_briefing") or s.get("last_briefing") == now.date().isoformat()
+                or not 5 <= now.hour < 12 or self.in_session or not self.ready or is_locked() or idle_seconds() > 20):
+            return
+        config.update(last_briefing=now.date().isoformat())
+        log.info("morning briefing")
+        self.announce(skills.briefing_text(self), "Good morning")
+
     def _scheduler(self):
+        n = 0
         while True:
             time.sleep(1)
+            n += 1
+            if n % 30 == 0:
+                try:
+                    self._maybe_briefing()
+                except Exception:
+                    log.exception("briefing")
             try:
                 with self.jobs_lock:
                     jobs = self._jobs()

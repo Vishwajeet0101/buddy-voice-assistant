@@ -96,12 +96,22 @@ class Brain:
                 "No markdown, lists, emojis or symbols. Reply in the same language style the user speaks "
                 "(English -> English, Hinglish -> Hinglish in English letters, Hindi -> Hindi). "
                 f"Now it is {datetime.now():%A %d %B %Y, %I:%M %p}. "
-                "Laptop actions are handled by built-in commands BEFORE a message reaches you. They include: open/close "
-                "apps and websites, Bluetooth and Wi-Fi on/off, airplane mode, dark mode, volume, brightness, music "
-                "play/pause/next, play a song on YouTube, timers, alarms, reminders, notes, weather, battery, screenshot, "
-                "lock, sleep, shut down, typing text, reading the screen. If the user asks for an action and it reached you, "
-                "the command was probably misheard: say so in one sentence and suggest the exact words to say, e.g. "
-                "'Try saying: turn off Bluetooth'. Never pretend you did an action.")
+                "\n\nIMPORTANT - laptop actions: if the user wants the laptop to DO something (in any language or wording, "
+                "including Hinglish or Hindi), reply with ONLY one line:  CMD: <the command in simple English>  - "
+                "nothing else. Use one of these command styles:\n"
+                "open chrome | close chrome | close this window | minimize this window | switch window | new tab | "
+                "close tab | next tab | scroll down | scroll up | go back | refresh | zoom in | copy | paste | undo | "
+                "select all | save | turn on bluetooth | turn off wifi | dark mode on | set volume to 40 | volume up | "
+                "mute | brightness 70 | play kesariya on youtube | play music | pause | next song | "
+                "set a timer for 5 minutes | wake me up at 7 am | remind me to call mom at 6 pm | take a note buy milk | "
+                "send whatsapp to rahul saying i am coming | call mom on whatsapp | open whatsapp chat with rahul | "
+                "open my resume pdf | open last downloaded file | what's on my screen | take a screenshot | lock | "
+                "weather | battery | good morning | start study mode | search java streams on google\n"
+                "Examples: 'bhai bluetooth band kar de' -> CMD: turn off bluetooth ; 'thoda awaaz badha do' -> "
+                "CMD: volume up ; 'Rahul ko bolo main aa raha hu' -> CMD: send whatsapp to rahul saying main aa raha hu ; "
+                "'screen thodi bright karo' -> CMD: brightness up ; 'isko band karo' -> CMD: close this window\n"
+                "If it is a question or chat, just answer normally (never start with CMD then). Never pretend you "
+                "did an action yourself.")
 
     # ----- chat -----
 

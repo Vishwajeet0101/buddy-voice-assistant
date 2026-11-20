@@ -23,6 +23,7 @@ PACKAGES = ["vosk", "sounddevice", "edge-tts", "customtkinter", "pystray", "Pill
 DOWNLOADS = {
     "python.zip": f"https://www.python.org/ftp/python/{PYVER}/python-{PYVER}-embed-amd64.zip",
     "model.zip": config.MODEL_URL,
+    "spk.zip": config.SPK_MODEL_URL,
 }
 
 START_BAT = r"""@echo off
@@ -93,8 +94,9 @@ def main():
 
     print("app + model ...", flush=True)
     shutil.copytree(HERE / "app", OUT / "app", ignore=shutil.ignore_patterns("__pycache__"))
-    with zipfile.ZipFile(files["model.zip"]) as z:
-        z.extractall(OUT / "models")
+    for name in ("model.zip", "spk.zip"):
+        with zipfile.ZipFile(files[name]) as z:
+            z.extractall(OUT / "models")
     (OUT / "Start Buddy.bat").write_text(START_BAT)
     (OUT / "README.txt").write_text(README, encoding="utf-8")
     shutil.copy2(HERE / "LICENSE", OUT / "LICENSE.txt")

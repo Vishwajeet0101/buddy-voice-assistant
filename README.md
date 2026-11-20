@@ -34,7 +34,14 @@
 | ⏰ **Timers, alarms, reminders** | *“Wake me up at 7”*, *“Remind me to call mom at 6”*. Even remembered after a restart. |
 | 👀 **Sees your screen** | *“What's on my screen?”*, *“Solve this question”*, *“Explain this code”* |
 | 🇮🇳 **Hinglish** | *“Chrome kholo”*, *“Kesariya bajao”*, *“Battery kitni hai?”* — replies in the same style. |
-| 🔒 **Private** | Listening for the name happens on your laptop. Pauses automatically during calls and when locked. |
+| ✋ **Interrupt it** | Say *“stop”* (or *“ruko”*, *“bas”*) while it's talking, or *“Hey Buddy …”* to ask something new. |
+| 🗣️ **Only your voice** | Train it once (3 sentences) and other people, the TV or YouTube can't wake it. |
+| 🧠 **Understands any wording** | *“bhai bluetooth band kar de”*, *“thoda awaaz badha do”*, Hindi script: the AI turns it into the right command. |
+| 💬 **WhatsApp** | *“Send WhatsApp to Rahul saying I'm coming”*, *“call Mom on WhatsApp”*. Always asks before sending. |
+| 🪟 **Smart PC control** | New tab · scroll down · close this window · switch to Chrome · copy/paste/undo · open my resume PDF · open last download |
+| ☀️ **Briefing & routines** | *“Good morning”* → weather, reminders, news. *“Start study mode”* → your own list of actions. |
+| 🔁 **Always on** | Starts with Windows, keeps working after sleep. Nothing to click. |
+| 🔒 **Private & safe** | Listening for the name happens on your laptop. API keys are encrypted with Windows. Pauses during calls and when locked. |
 | 💸 **Free** | No subscription. Uses the free tiers of Groq / Google Gemini (no credit card). |
 | ✏️ **Your own name** | Call it Jarvis, Nova, Friday, Max… whatever you like. |
 
@@ -78,6 +85,12 @@ Start with **“Hey Buddy”**, then wait for the reply, or say it all in one go
 | Notes & typing | take a note buy milk · read my notes · type hello world · what's in my clipboard |
 | Your screen | what's on my screen · explain this code · solve this question · summarize this page |
 | Laptop | lock · go to sleep · shut down · restart · empty the recycle bin *(Buddy asks before doing these)* |
+| Windows & tabs | new tab · close tab · next tab · scroll down · go back · refresh · zoom in · close this window · minimize · switch to Chrome · copy · paste · undo · save |
+| Files | open my resume PDF · find my DBMS assignment · open last downloaded file |
+| WhatsApp | send WhatsApp to Rahul saying I'm coming · Rahul ko message karo ki main aa raha hu · open chat with Mom · call Mom on WhatsApp |
+| Wireless & look | turn off Bluetooth · Wi-Fi on · airplane mode on · dark mode on |
+| Day & routines | good morning · what's the news · start study mode · movie mode · work mode *(edit them in settings)* |
+| While it talks | stop · ruko · bas · Hey Buddy, *new question* |
 | Anything else | who won the last World Cup? · explain recursion simply · give me a quick dinner idea · tell me a joke |
 | Buddy | stop listening · start listening · what can you do · thank you |
 
@@ -110,6 +123,19 @@ Start with **“Hey Buddy”**, then wait for the reply, or say it all in one go
 <details><summary><b>It hears me but doesn't speak</b></summary>
 
 Check your volume and output device. Click **▶ Test voice** in settings. Without internet, Buddy uses the built-in Windows voice. Right-click the tray icon → **Open log file** shows what happened.
+</details>
+
+<details><summary><b>How do WhatsApp messages work?</b></summary>
+
+Buddy uses the WhatsApp Desktop app on your laptop (install it from the Microsoft Store and log in once).
+For people you message often, add them in settings under **WhatsApp contacts** (`Mom = +91 98765 43210`). Buddy then opens the right chat directly and asks *“Send … to Mom?”* before sending.
+For anyone else, Buddy searches WhatsApp for the name, types the message, and waits for you to check it's the right person and say **“send”**.
+</details>
+
+<details><summary><b>Is my API key safe?</b></summary>
+
+Keys are stored only on your laptop, encrypted with Windows (DPAPI), so a copied settings file is useless on another computer or account. They're never uploaded anywhere except to Groq/Gemini to answer you. Keys are free (no card), so a leaked key can't cost money. You can delete and recreate one anytime on the Groq/Gemini website.
+On the free Gemini tier Google may use requests to improve its products, so don't tell Buddy passwords or OTPs, or ask it to read your screen while banking.
 </details>
 
 <details><summary><b>Can I change the name?</b></summary>
