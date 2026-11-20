@@ -21,7 +21,7 @@ from datetime import datetime
 import brain as brain_mod
 import config
 import skills
-from speech import esc_pressed, speaker
+from speech import esc_pressed, live_voice, speaker
 
 log = config.log
 RATE = 16000
@@ -375,6 +375,7 @@ class Engine:
         self.pending = None
         try:
             threading.Thread(target=winsound.Beep, args=(880, 80), daemon=True).start()
+            live_voice.warm()                  # open the voice connection now, so the answer is spoken sooner
             self.ui(lambda: self.orb().show("listening", self.title("listening"), "Listening..."))
             if rec is not None:
                 got = self.listen(stream, 2, rec=rec, frames=frames, quiet_end=0.7)
@@ -426,7 +427,7 @@ class Engine:
             return None
         return rest, words[-len(rest.split()):], wav
 
-    def listen(self, stream, wait_seconds, rec=None, frames=None, quiet_end=1.0):
+    def listen(self, stream, wait_seconds, rec=None, frames=None, quiet_end=0.8):
         """Records one sentence. Returns (offline_text, words, wav) or None if nothing was said.
         rec/frames: continue a sentence the wake-word listener already started hearing."""
         started = rec is not None
@@ -492,13 +493,20 @@ class Engine:
         if self.pending and text and avg >= 0.8:
             sure = True
         log.info("heard offline: %r (avg conf %.2f, %s)", text, avg, k)
+        if not text:
+            # The offline recogniser heard no words at all (noise, a cough, silence). Online speech models
+            # tend to invent text for such clips ("Thank you.", "See you guys."), so don't ask them.
+            return None
         final = text
         if not sure and self.brain.has_ai():
             self.ui(lambda: self.orb().update("thinking", self.title("thinking"), (text or "...") + " ..."))
             try:
                 online = self.brain.transcribe(wav)
                 log.info("heard online: %r", online)
-                final = online or text
+                junk = {"hinglish letters", "thank you", "thanks for watching", "see you guys", "bye", "you",
+                        "subtitles by the amara.org community", "voice command to a laptop assistant"}
+                if online and online.lower().strip(" .!?") not in junk:
+                    final = online
             except Exception as e:
                 log.warning("online speech-to-text failed: %r", e)
         final = re.sub(r"\s+", " ", (final or "")).strip()

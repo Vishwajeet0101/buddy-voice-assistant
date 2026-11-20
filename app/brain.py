@@ -261,7 +261,7 @@ class Brain:
         last = None
         for model in GROQ_STT:
             fields = {"model": model, "response_format": "json", "temperature": "0",
-                      "prompt": "Voice command to a laptop assistant. Hinglish is written in English letters."}
+                      "prompt": "Hey Buddy, open Chrome. Bluetooth band karo. Play Kesariya on YouTube."}
             body = b""
             for k, v in fields.items():
                 body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
