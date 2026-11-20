@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+models/
+dist/
+.build_cache/
+*.part
+.venv/

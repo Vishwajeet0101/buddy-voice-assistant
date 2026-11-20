@@ -1,0 +1,7 @@
+vosk
+sounddevice
+edge-tts
+customtkinter
+pystray
+Pillow
+psutil
