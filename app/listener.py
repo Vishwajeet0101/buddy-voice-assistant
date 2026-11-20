@@ -36,6 +36,18 @@ def rms(data):
     return (sum(s * s for s in a) / max(1, len(a))) ** 0.5
 
 
+def amplify(data, gain):
+    """Makes a quiet microphone louder (many laptop mics record very softly)."""
+    if gain <= 1.2:
+        return data
+    a = array.array("h", data)
+    g = gain
+    for i, s in enumerate(a):
+        v = int(s * g)
+        a[i] = 32767 if v > 32767 else -32768 if v < -32768 else v
+    return a.tobytes()
+
+
 def to_wav(frames):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -98,6 +110,7 @@ class Engine:
         self.cancel = threading.Event()
         self.in_session = False
         self.levels = []
+        self.gain = 1.0
         self.name = "buddy"
         self.pending = None             # a skill asked a question; the next answer goes to it
         self.show_text = None
@@ -274,10 +287,9 @@ class Engine:
                 if self.pause_reason() or self._wake_name() != self.name:
                     return
             data = bytes(stream.read(BLOCK)[0])
-            level = rms(data)
-            self.levels.append(level)
-            del self.levels[:-80]
-            silent_for = 0.0 if level > self.threshold() * 0.6 else silent_for + 0.1
+            level = self._measure(data)
+            data = amplify(data, self.gain)
+            silent_for = 0.0 if level > self.gate() else silent_for + 0.1
             if silent_for > 2.5:           # quiet room: don't run the recogniser (saves battery)
                 pre.append(data)
                 del pre[:-5]
@@ -309,10 +321,32 @@ class Engine:
                 self.session(stream, greet=None, rec=rec, frames=frames)
             return
 
-    def threshold(self):
+    # ----- loudness: everything is relative to this microphone's own background noise -----
+
+    def _measure(self, data):
+        level = rms(data)
+        self.levels.append(level)
+        del self.levels[:-300]                       # last 30 seconds
+        self._n_measured = getattr(self, "_n_measured", 0) + 1
+        # Automatic gain: follows loud sounds at once (no distortion), lets go over ~2 s (quiet voices get boosted).
+        self.env = max(level, getattr(self, "env", 0.0) * 0.93)
+        self.gain = max(1.0, min(15.0, 3000 / max(self.env, self.floor() * 3, 1.0)))
+        if self._n_measured % 600 == 0:
+            log.info("mic: floor %.1f, loud %.1f, gain x%.1f", self.floor(), sorted(self.levels)[-1], self.gain)
+        return level
+
+    def floor(self):
         if not self.levels:
-            return 400
-        return max(300, sorted(self.levels)[len(self.levels) // 5] * 2.5)
+            return 5.0
+        return sorted(self.levels)[len(self.levels) // 5]
+
+    def threshold(self):
+        """Louder than this = someone is talking."""
+        return max(self.floor() * 3.5, 12)
+
+    def gate(self):
+        """Louder than this = worth running the recogniser."""
+        return max(self.floor() * 2.2, 6)
 
     # ===================== one conversation =====================
 
@@ -417,9 +451,9 @@ class Engine:
                 self.cancel.set()
                 return None
             data = bytes(stream.read(BLOCK)[0])
-            level = rms(data)
+            level = self._measure(data)
             self.ui(lambda lv=min(1.0, level / (threshold * 4)): self.orb().set_level(lv))
-            partial = feed(data)
+            partial = feed(amplify(data, self.gain))
             if partial or (texts and partial is None):
                 started = True
                 live = " ".join(texts + ([partial] if partial else []))
@@ -450,8 +484,11 @@ class Engine:
         confs = [w["conf"] for w in words if w["word"] != "[unk]"]
         avg = sum(confs) / len(confs) if confs else 0
         k = skills.kind(text) if text else None
+        question = bool(re.match(r"(?:what|who|whom|why|how|when|where|which|is|are|was|were|do|does|did|can|could|"
+                                 r"should|will|would|tell me|explain|give me|define|meaning)\b", text or ""))
+        # Not a known command and not clearly a question? It may be a misheard command - double-check online.
         sure = (text and k == "fast" and avg >= 0.5) or (
-            text and k is None and avg >= 0.88 and min(confs) >= 0.6 and len(confs) >= 3)
+            text and k is None and question and avg >= 0.88 and min(confs) >= 0.6 and len(confs) >= 3)
         if self.pending and text and avg >= 0.8:
             sure = True
         log.info("heard offline: %r (avg conf %.2f, %s)", text, avg, k)

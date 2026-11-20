@@ -16,7 +16,8 @@ import config
 
 log = config.log
 GROQ = "https://api.groq.com/openai/v1"
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+GROQ_MODELS = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-4-maverick-17b-128e-instruct",
+               "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
 GROQ_STT = ["whisper-large-v3-turbo", "whisper-large-v3"]
 GEMINI = "https://generativelanguage.googleapis.com/v1beta/models"
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
@@ -148,7 +149,7 @@ class Brain:
             chat = [i for i in ids if not any(x in i.lower() for x in ("whisper", "guard", "tts", "playai", "orpheus",
                                                                        "prompt", "compound", "safeguard"))]
             pick = [m for m in GROQ_MODELS if m in chat] + sorted(
-                [m for m in chat if m not in GROQ_MODELS], key=lambda m: ("instant" not in m, "70b" not in m))
+                [m for m in chat if m not in GROQ_MODELS and "allam" not in m], key=lambda m: "llama" not in m)
             if pick:
                 self._groq_list = pick[:4]
                 log.info("groq models: %s", self._groq_list)
@@ -164,10 +165,20 @@ class Brain:
         models = self._groq_models(key)
         for i in range(len(models)):
             model = models[(self.groq_model + i) % len(models)]
+            body = {"model": model, "messages": msgs, "stream": True, "max_tokens": 800, "temperature": 0.6}
+            if "gpt-oss" in model:          # "thinking" models: keep the thinking short so answers start fast
+                body.update(reasoning_effort="low", include_reasoning=False)
+            elif "qwen3" in model:
+                body.update(reasoning_effort="none")
             try:
-                resp = _post(f"{GROQ}/chat/completions",
-                             {"model": model, "messages": msgs, "stream": True, "max_tokens": 600, "temperature": 0.6},
-                             {"Authorization": f"Bearer {key}"}, stream=True)
+                try:
+                    resp = _post(f"{GROQ}/chat/completions", body, {"Authorization": f"Bearer {key}"}, stream=True)
+                except urllib.error.HTTPError as e:
+                    if e.code != 400 or len(body) == 5:
+                        raise
+                    for k in ("reasoning_effort", "include_reasoning"):     # option not supported - try plain
+                        body.pop(k, None)
+                    resp = _post(f"{GROQ}/chat/completions", body, {"Authorization": f"Bearer {key}"}, stream=True)
             except urllib.error.HTTPError as e:
                 last = e
                 if e.code in SWITCH:
